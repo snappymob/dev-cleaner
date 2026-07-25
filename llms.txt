@@ -16,7 +16,7 @@
 ## Installation & Usage
 
 ### One-liner (Fastest)
-curl -fsSL https://raw.githubusercontent.com/snappymob/dev-cleaner/main/dev-cleaner.sh -o dev-cleanup.sh && chmod +x dev-cleanup.sh && ./dev-cleanup.sh
+curl -fsSL https://raw.githubusercontent.com/snappymob/dev-cleaner/v1.3.0/dev-cleaner.sh -o dev-cleanup.sh && chmod +x dev-cleanup.sh && ./dev-cleanup.sh
 
 ### Homebrew (Recommended for macOS)
 brew tap snappymob/dev-cleaner

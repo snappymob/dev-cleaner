@@ -53,7 +53,7 @@ This tool is for **educational purposes**, focusing on safely removing developme
 To download, grant permission, and run the utility in one line:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/snappymob/dev-cleaner/main/dev-cleaner.sh -o dev-cleanup.sh && chmod +x dev-cleanup.sh && ./dev-cleanup.sh
+curl -fsSL https://raw.githubusercontent.com/snappymob/dev-cleaner/v1.3.0/dev-cleaner.sh -o dev-cleanup.sh && chmod +x dev-cleanup.sh && ./dev-cleanup.sh
 ```
 
 ##### Command-Line Options
@@ -91,7 +91,7 @@ The Windows version includes all cross-platform cleanups plus:
 - **NuGet:** Clears global packages cache (`~/.nuget/packages`), HTTP cache, and temp files
 - **Windows Temp:** Clears user and system temp folders, plus Recycle Bin
 
-> **Note:** Some operations require Administrator privileges. The script will automatically request elevation if needed.
+> **Note:** Some operations require Administrator privileges. The script will offer to relaunch elevated; if you decline, admin-only steps are skipped and everything else still runs.
 
 #### 🧹 Flutter Cleanup Details
 
