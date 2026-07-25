@@ -23,11 +23,12 @@ This tool is for **educational purposes**, focusing on safely removing developme
 
 * **One-Click Cleanup:** Clear Xcode, Flutter, Visual Studio, Gradle, npm, NuGet, IDE, and browser caches.
 * **Comprehensive Flutter Cleanup:** Recursively finds and cleans all Flutter projects, removing:
-  * FVM SDK caches and configurations (`.fvm`, `.fvmrc`)
-  * Flutter build artifacts (`build`, `.dart_tool`, `.packages`, `pubspec.lock`)
+  * Project-local FVM cache (`.fvm`)
+  * Flutter build artifacts (`build`, `.dart_tool`, `.packages`)
   * Android Gradle caches (`android/.gradle`, `android/build`, `android/app/build`)
-  * iOS CocoaPods caches (`ios/Pods`, `ios/Podfile.lock`, `ios/.symlinks`, Flutter frameworks)
+  * iOS CocoaPods caches (`ios/Pods`, `ios/.symlinks`, Flutter frameworks)
   * Global Flutter cache
+  * Source-controlled files (`pubspec.lock`, `ios/Podfile.lock`, `.fvmrc`) are **never** touched
 * **Interactive Menu:** Allows selection of specific cleanup targets (e.g., Xcode only).
 * **Multi-platform Support:** Supports **macOS**, **Linux**, and **Windows**.
 
@@ -97,8 +98,8 @@ The Windows version includes all cross-platform cleanups plus:
 The Flutter cleanup option (Option 4) performs a comprehensive recursive cleanup of all Flutter projects starting from the current directory. It:
 
 - **Recursively searches** for all `pubspec.yaml` files
-- **Removes FVM** SDK caches and configurations
-- **Cleans build artifacts**: `build/`, `.dart_tool/`, `.packages`, `pubspec.lock`
+- **Removes the project-local FVM cache** (`.fvm`; the global FVM SDK store and `.fvmrc` are left alone)
+- **Cleans build artifacts**: `build/`, `.dart_tool/`, `.packages` (lockfiles are never deleted)
 - **Removes Android Gradle** caches from each project
 - **Removes iOS CocoaPods** caches and Flutter frameworks
 - **Cleans global Flutter cache**

@@ -28,8 +28,8 @@ else
 fi
 
 # --- Global Variables ---
-SCRIPT_VERSION="1.2.0"
-GITHUB_REPO="https://github.com/jemishavasoya/dev-cleaner"
+SCRIPT_VERSION="1.3.0"
+GITHUB_REPO="https://github.com/snappymob/dev-cleaner"
 DRY_RUN=false
 
 # Check if FLUTTER_SEARCH_DIR is already set as environment variable
@@ -121,6 +121,10 @@ docker_size_to_kb() {
 # Usage: du_kb_sum <path-or-glob> [<path-or-glob> ...]
 du_kb_sum() {
     local total=0 path expanded_path kb
+    # Empty IFS: glob patterns expand WITHOUT word-splitting, so an unmatched
+    # pattern containing spaces ("…/Microsoft Edge/*") can never split into
+    # unrelated sibling paths.
+    local IFS=
     local expanded_paths=()
     for path in "$@"; do
         expanded_paths=()
@@ -148,6 +152,8 @@ du_kb_sum() {
 # The sudo session is already kept alive by main_loop(), so no extra prompt.
 sudo_du_kb_sum() {
     local total=0 path expanded_path kb
+    # Empty IFS: glob expansion without word-splitting (see du_kb_sum).
+    local IFS=
     local expanded_paths=()
     for path in "$@"; do
         expanded_paths=()
@@ -176,6 +182,10 @@ sudo_du_kb_sum() {
 safe_rm() {
     local recursive=""
     local paths=()
+    # Empty IFS: glob patterns expand WITHOUT word-splitting, so an unmatched
+    # pattern containing spaces ("…/Microsoft Edge/*") can never split into
+    # unrelated sibling paths and delete them.
+    local IFS=
     
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -231,6 +241,9 @@ safe_rm() {
 safe_sudo_rm() {
     local recursive=""
     local paths=()
+    # Empty IFS: glob expansion without word-splitting (see safe_rm) — this
+    # variant runs rm as root, so wrong-target expansion would be fatal.
+    local IFS=
     
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -284,8 +297,6 @@ safe_sudo_rm() {
 cleanup_xcode() {
     print_item "✓" "${GREEN}" "Clearing Xcode DerivedData..."
     safe_rm -rf ~/Library/Developer/Xcode/DerivedData/
-    print_item "✓" "${GREEN}" "Removing old Simulator devices..."
-    safe_rm -rf ~/Library/Developer/CoreSimulator/Devices/
     print_item "✓" "${GREEN}" "Removing CoreSimulator caches..."
     safe_rm -rf ~/Library/Developer/CoreSimulator/Caches/*
     # System-level CoreSimulator cache lives under /Library and needs sudo.
@@ -297,14 +308,34 @@ cleanup_xcode() {
     safe_rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport/
     print_item "✓" "${GREEN}" "Removing Xcode caches..."
     safe_rm -rf ~/Library/Caches/com.apple.dt.Xcode/
-    print_item "✓" "${GREEN}" "Removing Xcode Archives..."
-    safe_rm -rf ~/Library/Developer/Xcode/Archives/
     print_item "✓" "${GREEN}" "Removing Xcode build Products..."
     safe_rm -rf ~/Library/Developer/Xcode/Products/
     print_item "✓" "${GREEN}" "Removing Xcode DocumentationCache..."
     safe_rm -rf ~/Library/Developer/Xcode/DocumentationCache/
     print_item "✓" "${GREEN}" "Cleaning CoreDevice cache..."
     safe_rm -rf ~/Library/Containers/com.apple.CoreDevice.CoreDeviceService/Data/Library/Caches/*
+}
+
+# DESTRUCTIVE, opt-in only (never part of "Clear All"):
+#  - Xcode Archives hold the dSYMs for every release you have shipped;
+#    without them crash reports from those builds can never be symbolicated.
+#  - Deleting CoreSimulator/Devices removes EVERY simulator, including any
+#    app data installed in them.
+cleanup_xcode_deep() {
+    if ! $DRY_RUN; then
+        echo -e "${RED}${BOLD}⚠️  This deletes ALL Xcode Archives (release dSYMs — needed to symbolicate"
+        echo -e "crash reports from shipped builds) and ALL simulator devices with their data."
+        echo -e "This CANNOT be undone.${NC}"
+        read -p "Proceed with deep Xcode cleanup? (y/N): " deep_confirm
+        if [[ "$deep_confirm" != "y" && "$deep_confirm" != "Y" ]]; then
+            print_item "ℹ️" "${YELLOW}" "Deep Xcode cleanup skipped."
+            return 0
+        fi
+    fi
+    print_item "✓" "${GREEN}" "Removing Xcode Archives (release dSYMs)..."
+    safe_rm -rf ~/Library/Developer/Xcode/Archives/
+    print_item "✓" "${GREEN}" "Removing ALL Simulator devices..."
+    safe_rm -rf ~/Library/Developer/CoreSimulator/Devices/
 }
 
 cleanup_android() {
@@ -333,14 +364,18 @@ cleanup_android_sdk() {
         print_item "✓" "${GREEN}" "Cleaning old Android SDK build-tools (keeping latest 2 versions)..."
         # Keep only latest 2 versions of build-tools
         if [ -d "$HOME/Library/Android/sdk/build-tools" ]; then
-            cd "$HOME/Library/Android/sdk/build-tools" 2>/dev/null || return
-            if $DRY_RUN; then
-                ls -t | tail -n +3 | while read -r dir; do
-                    echo -e "${YELLOW}[DRY-RUN] Would delete: $HOME/Library/Android/sdk/build-tools/$dir${NC}"
+            # Subshell: the cd must not leak into the rest of the session
+            # (it previously left every later cleanup running from the SDK dir).
+            (
+                cd "$HOME/Library/Android/sdk/build-tools" 2>/dev/null || exit 0
+                ls -t | tail -n +3 | while IFS= read -r dir; do
+                    if $DRY_RUN; then
+                        echo -e "${YELLOW}[DRY-RUN] Would delete: $HOME/Library/Android/sdk/build-tools/$dir${NC}"
+                    else
+                        rm -rf "$dir"
+                    fi
                 done
-            else
-                ls -t | tail -n +3 | xargs -I {} rm -rf {}
-            fi
+            )
         fi
 
         print_item "✓" "${GREEN}" "Cleaning old Android platform-tools..."
@@ -374,49 +409,55 @@ cleanup_flutter() {
             return 1
         fi
         
-        # Find all pubspec.yaml files recursively and clean each project
+        # Resolve to an absolute path ONCE so the relative paths that find
+        # emits stay valid, and cd'ing into projects can never make later
+        # iterations resolve against the wrong directory.
+        search_dir=$(cd "$search_dir" 2>/dev/null && pwd)
+        if [ -z "$search_dir" ]; then
+            print_item "✕" "${RED}" "Cannot access directory: ${1:-.}"
+            return 1
+        fi
+
+        # Find all pubspec.yaml files recursively and clean each project.
+        # Deliberately NOT deleted: pubspec.lock, ios/Podfile.lock and .fvmrc —
+        # these are source-controlled files that pin dependency versions, not
+        # caches. `fvm destroy` is also gone: it wipes the GLOBAL FVM SDK
+        # store, not just this project.
         local cleaned_count=0
         while IFS= read -r -d '' pubspec; do
-            project_dir=$(cd "$(dirname "$pubspec")" 2>/dev/null && pwd)
-            if [ -z "$project_dir" ]; then
-                continue
-            fi
-            
+            project_dir=$(dirname "$pubspec")
             echo -e "${CYAN}  🧹 Cleaning: $project_dir${NC}"
-            
-            cd "$project_dir" 2>/dev/null || { 
-                print_item "⚠️" "${YELLOW}" "Skipped (can't access $project_dir)"
-                continue
-            }
-            
-            # --- 1. FVM destroy ---
-            if [ -d ".fvm" ]; then
-                echo -e "${FAINT}    🔥 Destroying FVM SDK cache...${NC}"
-                yes | fvm destroy >/dev/null 2>&1 || true
-            fi
-            
-            # --- 2. Remove FVM configs ---
-            if [ -d ".fvm" ] || [ -f ".fvmrc" ]; then
-                echo -e "${FAINT}    🔥 Removing FVM folders...${NC}"
-                rm -rf .fvm .fvmrc 2>/dev/null || true
-            fi
-            
-            # --- 3. Clean Flutter build & cache dirs ---
-            echo -e "${FAINT}    🔥 Removing Flutter build and Pub Dev caches...${NC}"
-            rm -rf build .dart_tool .packages pubspec.lock 2>/dev/null || true
-            
-            # --- 4. Clean Gradle caches ---
-            if [ -d "android" ]; then
-                echo -e "${FAINT}    🔥 Removing Gradle caches...${NC}"
-                rm -rf android/.gradle android/build android/app/build 2>/dev/null || true
-            fi
-            
-            # --- 5. Clean CocoaPods (iOS) ---
-            if [ -d "ios" ]; then
-                echo -e "${FAINT}    🔥 Removing CocoaPods caches...${NC}"
-                rm -rf ios/Pods ios/Podfile.lock ios/.symlinks ios/Flutter/Flutter.framework ios/Flutter/Flutter.podspec 2>/dev/null || true
-            fi
-            
+
+            # Subshell: the cd can never leak into the caller or later loops.
+            (
+                cd "$project_dir" 2>/dev/null || {
+                    print_item "⚠️" "${YELLOW}" "Skipped (can't access $project_dir)"
+                    exit 0
+                }
+
+                # --- 1. Remove project-local FVM cache (symlinks; gitignored) ---
+                if [ -d ".fvm" ]; then
+                    echo -e "${FAINT}    🔥 Removing project .fvm folder...${NC}"
+                    safe_rm -rf .fvm
+                fi
+
+                # --- 2. Clean Flutter build & cache dirs ---
+                echo -e "${FAINT}    🔥 Removing Flutter build and Pub Dev caches...${NC}"
+                safe_rm -rf build .dart_tool .packages
+
+                # --- 3. Clean Gradle caches ---
+                if [ -d "android" ]; then
+                    echo -e "${FAINT}    🔥 Removing Gradle caches...${NC}"
+                    safe_rm -rf android/.gradle android/build android/app/build
+                fi
+
+                # --- 4. Clean CocoaPods (iOS) ---
+                if [ -d "ios" ]; then
+                    echo -e "${FAINT}    🔥 Removing CocoaPods caches...${NC}"
+                    safe_rm -rf ios/Pods ios/.symlinks ios/Flutter/Flutter.framework ios/Flutter/Flutter.podspec
+                fi
+            )
+
             cleaned_count=$((cleaned_count + 1))
             echo -e "${GREEN}  ✅ Cleaned $project_dir${NC}"
         done < <(find "$search_dir" -type f -name "pubspec.yaml" -print0 2>/dev/null)
@@ -427,8 +468,12 @@ cleanup_flutter() {
             print_item "ℹ️" "${YELLOW}" "No Flutter projects found to clean in: $search_dir"
         fi
         
-        print_item "✓" "${GREEN}" "Cleaning Flutter global cache..."
-        flutter cache clean 2>/dev/null || true
+        if $DRY_RUN; then
+            echo -e "${YELLOW}[DRY-RUN] Would run: flutter cache clean${NC}"
+        else
+            print_item "✓" "${GREEN}" "Cleaning Flutter global cache..."
+            flutter cache clean 2>/dev/null || true
+        fi
     else
         print_item "✕" "${YELLOW}" "Flutter command not found. Skipping."
     fi
@@ -452,6 +497,10 @@ cleanup_platformIO() {
     # -print0 handles spaces/newlines safely
     find ~/ -maxdepth 4 -type d -name "Library" -prune -o -name "platformio.ini" -print0 | while IFS= read -r -d '' file; do
         dir="$(dirname "$file")"
+        if $DRY_RUN; then
+            echo -e "${YELLOW}[DRY-RUN] Would run: ${PIO_BIN} run -t clean in ${dir}${NC}"
+            continue
+        fi
         printf 'Running: %s run clean in %s\n' "$PIO_BIN" "$dir"
 
         # Run in a subshell to avoid changing caller's CWD
@@ -461,20 +510,32 @@ cleanup_platformIO() {
 
 cleanup_npm_yarn() {
     if command -v npm &> /dev/null; then
-        print_item "✓" "${GREEN}" "Cleaning npm cache..."
-        npm cache clean --force
+        if $DRY_RUN; then
+            echo -e "${YELLOW}[DRY-RUN] Would run: npm cache clean --force${NC}"
+        else
+            print_item "✓" "${GREEN}" "Cleaning npm cache..."
+            npm cache clean --force
+        fi
     else
         print_item "✕" "${YELLOW}" "npm not found. Skipping."
     fi
     if command -v yarn &> /dev/null; then
-        print_item "✓" "${GREEN}" "Cleaning yarn cache..."
-        yarn cache clean
+        if $DRY_RUN; then
+            echo -e "${YELLOW}[DRY-RUN] Would run: yarn cache clean${NC}"
+        else
+            print_item "✓" "${GREEN}" "Cleaning yarn cache..."
+            yarn cache clean
+        fi
     else
         print_item "✕" "${YELLOW}" "yarn not found. Skipping."
     fi
     if command -v pnpm &> /dev/null; then
-        print_item "✓" "${GREEN}" "Pruning pnpm store..."
-        pnpm store prune
+        if $DRY_RUN; then
+            echo -e "${YELLOW}[DRY-RUN] Would run: pnpm store prune${NC}"
+        else
+            print_item "✓" "${GREEN}" "Pruning pnpm store..."
+            pnpm store prune
+        fi
     else
         print_item "✕" "${YELLOW}" "pnpm not found. Skipping."
     fi
@@ -501,8 +562,14 @@ cleanup_nuget() {
 
 cleanup_homebrew() {
     if command -v brew &> /dev/null; then
-        print_item "✓" "${GREEN}" "Cleaning Homebrew (brew)..."
-        brew cleanup
+        if $DRY_RUN; then
+            # brew cleanup has a real dry-run mode of its own.
+            echo -e "${YELLOW}[DRY-RUN] Homebrew cleanup preview (brew cleanup -n):${NC}"
+            brew cleanup -n 2>/dev/null || true
+        else
+            print_item "✓" "${GREEN}" "Cleaning Homebrew (brew)..."
+            brew cleanup
+        fi
     else
         print_item "✕" "${YELLOW}" "Homebrew not found. Skipping."
     fi
@@ -530,6 +597,18 @@ cleanup_ide_caches() {
 }
 
 cleanup_system_junk() {
+    # Opt-in only, never part of "Clear All": emptying the Trash removes the
+    # last chance to recover anything deleted by mistake, and wiping system
+    # logs destroys audit/diagnostic history.
+    if ! $DRY_RUN; then
+        echo -e "${RED}${BOLD}⚠️  This empties the Trash (files become unrecoverable) and deletes"
+        echo -e "user + system logs. This CANNOT be undone.${NC}"
+        read -p "Proceed with system junk cleanup? (y/N): " junk_confirm
+        if [[ "$junk_confirm" != "y" && "$junk_confirm" != "Y" ]]; then
+            print_item "ℹ️" "${YELLOW}" "System junk cleanup skipped."
+            return 0
+        fi
+    fi
     print_item "✓" "${GREEN}" "Emptying the Trash..."
     safe_sudo_rm -r ~/.Trash/*
     safe_sudo_rm -r /Volumes/*/.Trashes/*
@@ -627,6 +706,17 @@ cleanup_app_containers() {
 }
 
 cleanup_timemachine_snapshots() {
+    # Opt-in only, never part of "Clear All": local snapshots are the
+    # on-disk backups you would restore from if a cleanup deletes too much.
+    if ! $DRY_RUN; then
+        echo -e "${RED}${BOLD}⚠️  Local snapshots are your on-device Time Machine backups."
+        echo -e "Deleting them removes recent restore points. This CANNOT be undone.${NC}"
+        read -p "Delete ALL local Time Machine snapshots? (y/N): " tm_confirm
+        if [[ "$tm_confirm" != "y" && "$tm_confirm" != "Y" ]]; then
+            print_item "ℹ️" "${YELLOW}" "Time Machine snapshot cleanup skipped."
+            return 0
+        fi
+    fi
     print_item "✓" "${GREEN}" "Removing Time Machine local snapshots..."
 
     # List and delete local snapshots
@@ -755,11 +845,9 @@ estimate_all() {
     print_item "•" "${FAINT}" "Measuring Xcode caches..."
     kb=$(du_kb_sum \
         "$HOME/Library/Developer/Xcode/DerivedData" \
-        "$HOME/Library/Developer/CoreSimulator/Devices" \
         "$HOME/Library/Developer/CoreSimulator/Caches"/* \
         "$HOME/Library/Developer/Xcode/iOS DeviceSupport" \
         "$HOME/Library/Caches/com.apple.dt.Xcode" \
-        "$HOME/Library/Developer/Xcode/Archives" \
         "$HOME/Library/Developer/Xcode/Products" \
         "$HOME/Library/Developer/Xcode/DocumentationCache" \
         "$HOME/Library/Containers/com.apple.CoreDevice.CoreDeviceService/Data/Library/Caches"/*)
@@ -769,6 +857,13 @@ estimate_all() {
     kb=$((kb + $(sudo_du_kb_sum /Library/Developer/CoreSimulator/Caches/*)))
     set_estimate xcode "~$(human_kb "$kb")"
     total=$((total + kb))
+
+    print_item "•" "${FAINT}" "Measuring deep Xcode targets (simulators, Archives)..."
+    # Destructive opt-in option; NOT added to the Clear All total.
+    kb=$(du_kb_sum \
+        "$HOME/Library/Developer/CoreSimulator/Devices" \
+        "$HOME/Library/Developer/Xcode/Archives")
+    set_estimate xcode_deep "~$(human_kb "$kb")"
 
     print_item "•" "${FAINT}" "Measuring Android/Gradle caches..."
     kb=$(du_kb_sum \
@@ -880,7 +975,8 @@ estimate_all() {
         /private/var/log/* \
         /Library/Logs/*)
     set_estimate system "~$(human_kb "$system_kb")"
-    total=$((total + system_kb))
+    # Not added to the total: system junk is opt-in and no longer part of
+    # "Clear All", so the Clear All estimate must not include it.
 
     print_item "•" "${FAINT}" "Measuring browser caches..."
     kb=$(du_kb_sum \
@@ -1004,7 +1100,7 @@ display_menu() {
     echo -e "${GREEN} 6.${NC} Clean Homebrew Caches$(est homebrew)"
     echo -e "${GREEN} 7.${NC} Clear CocoaPods Caches$(est cocoapods)"
     echo -e "${GREEN} 8.${NC} Clear IDE (JetBrains, VSCode) Caches$(est ide)"
-    echo -e "${GREEN} 9.${NC} Clean System Junk & Logs (requires sudo)$(est system)"
+    echo -e "${GREEN} 9.${NC} Clean System Junk & Logs ${RED}(destructive: empties Trash — not in Clear All; sudo)${NC}$(est system)"
     echo -e "${GREEN}10.${NC} Clear Browser Caches (Chrome, Brave, Firefox, Safari, Edge, Opera)$(est browser)"
     echo -e "${GREEN}11.${NC} Clear PlatformIO Caches$(est platformio)"
     echo -e "${GREEN}12.${NC} Clean Android SDK (old build-tools, x86 images)$(est android_sdk)"
@@ -1012,12 +1108,13 @@ display_menu() {
     echo -e "${GREEN}14.${NC} Clear Electron cache$(est electron)"
     echo -e "${GREEN}15.${NC} Clear Docker (prune containers, dangling images & build cache; asks before removing unused tagged images)$(est docker)"
     echo -e "${GREEN}16.${NC} Clean App Containers (Slack, Teams, Discord, Spotify, WhatsApp)$(est appcontainers)"
-    echo -e "${GREEN}17.${NC} Remove Time Machine Local Snapshots (requires sudo)$(est timemachine)"
+    echo -e "${GREEN}17.${NC} Remove Time Machine Local Snapshots ${RED}(destructive: deletes local backups — not in Clear All; sudo)${NC}$(est timemachine)"
     echo -e "${GREEN}18.${NC} Clear .NET NuGet Caches (global-packages, http-cache, temp, plugins)$(est nuget)"
+    echo -e "${GREEN}19.${NC} Deep Clean Xcode ${RED}(destructive: ALL simulators + Archives/dSYMs — not in Clear All)${NC}$(est xcode_deep)"
     echo ""
     echo -e "${CYAN}99.${NC} Estimate reclaimable space ${FAINT}(read-only, ~ = approximate)${NC}"
     echo ""
-    echo -e "→ Please enter your choice (0-18, or 99 to estimate): ${NC}\c"
+    echo -e "→ Please enter your choice (0-19, or 99 to estimate): ${NC}\c"
 }
 
 # --- Help function ---
@@ -1089,13 +1186,15 @@ main_loop() {
                 cleanup_homebrew
                 cleanup_cocoapods
                 cleanup_ide_caches
-                cleanup_system_junk
                 cleanup_browser_caches
                 cleanup_cordova
                 cleanup_electron
                 cleanup_docker
                 cleanup_app_containers
-                cleanup_timemachine_snapshots
+                # NOT included: cleanup_system_junk (Trash/logs),
+                # cleanup_timemachine_snapshots (local backups) and
+                # cleanup_xcode_deep (Archives/simulators) — destructive,
+                # opt-in via their own menu entries only.
                 ;;
             2)
                 print_section_header "Performing Xcode Cleanup"
@@ -1206,6 +1305,10 @@ main_loop() {
                 print_section_header "Performing .NET NuGet Cleanup"
                 cleanup_nuget
                 ;;
+            19)
+                print_section_header "Performing Deep Xcode Cleanup (destructive)"
+                cleanup_xcode_deep
+                ;;
             99)
                 print_section_header "Estimating Reclaimable Space"
                 estimate_all
@@ -1214,7 +1317,7 @@ main_loop() {
                 continue
                 ;;
             *)
-                echo -e "${RED}Invalid choice. Please enter a number between 0 and 18.${NC}"
+                echo -e "${RED}Invalid choice. Please enter a number between 0 and 19.${NC}"
                 sleep 2
                 ;;
         esac

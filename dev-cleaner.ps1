@@ -1,21 +1,24 @@
 ﻿# -----------------------------------------------------------------------------
 # Dev Cleanup Utility - Windows PowerShell Edition
 # -----------------------------------------------------------------------------
-# Version: 1.2.0
+# Version: 1.3.0
 # Platform: Windows (PowerShell 5.1+)
-# Repository: https://github.com/jemishavasoya/dev-cleaner
+# Repository: https://github.com/snappymob/dev-cleaner
 # -----------------------------------------------------------------------------
 
 param(
     [switch]$Help,
     [switch]$Version,
     [string]$FlutterDir,
-    [string]$VsDir
+    [string]$VsDir,
+    # Internal: set by Request-Elevation so the elevated relaunch keeps the
+    # caller's working directory (elevated processes start in System32).
+    [string]$WorkDir
 )
 
 # --- Global Variables ---
-$SCRIPT_VERSION = "1.2.0"
-$GITHUB_REPO = "https://github.com/jemishavasoya/dev-cleaner"
+$SCRIPT_VERSION = "1.3.0"
+$GITHUB_REPO = "https://github.com/snappymob/dev-cleaner"
 
 # --- Error Tracking ---
 $script:FailedItems = [System.Collections.ArrayList]::new()
@@ -150,18 +153,34 @@ function Test-Administrator {
 }
 
 function Request-Elevation {
-    if (-not (Test-Administrator)) {
-        Write-Host "This script requires Administrator privileges." -ForegroundColor Yellow
-        Write-Host "Relaunching with elevation..." -ForegroundColor Yellow
+    if (Test-Administrator) { return }
 
-        $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-
-        if ($FlutterDir) { $arguments += " -FlutterDir `"$FlutterDir`"" }
-        if ($VsDir) { $arguments += " -VsDir `"$VsDir`"" }
-
-        Start-Process PowerShell -Verb RunAs -ArgumentList $arguments
-        exit
+    # Elevation is optional: only the system-temp / Windows Update steps need
+    # admin, and Clear-WindowsTemp already skips those gracefully without it.
+    Write-Host "Administrator privileges are only needed for system temp and" -ForegroundColor Yellow
+    Write-Host "Windows Update cache cleanup; everything else runs without them." -ForegroundColor Yellow
+    $ans = Read-Host "Relaunch elevated? Admin-only steps are skipped otherwise. (y/N)"
+    if ($ans -ne 'y' -and $ans -ne 'Y') {
+        Write-Item "ℹ️" "Yellow" "Continuing without elevation; admin-only steps will be skipped."
+        return
     }
+
+    # -Verb RunAs ignores the working directory (the elevated process starts
+    # in System32), so pass the current directory explicitly and resolve any
+    # relative search dirs to absolute paths before relaunching.
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -WorkDir `"$PWD`""
+
+    if ($FlutterDir) {
+        $fd = if (Test-Path $FlutterDir) { (Resolve-Path $FlutterDir).Path } else { $FlutterDir }
+        $arguments += " -FlutterDir `"$fd`""
+    }
+    if ($VsDir) {
+        $vd = if (Test-Path $VsDir) { (Resolve-Path $VsDir).Path } else { $VsDir }
+        $arguments += " -VsDir `"$vd`""
+    }
+
+    Start-Process PowerShell -Verb RunAs -ArgumentList $arguments
+    exit
 }
 
 # --- Error Tracking Functions ---
@@ -325,43 +344,40 @@ function Clear-Flutter {
     $pubspecFiles = Get-ChildItem -Path $SearchDir -Filter "pubspec.yaml" -Recurse -ErrorAction SilentlyContinue
     $cleanedCount = 0
 
+    # Absolute paths throughout: no Push-Location, so a failed directory
+    # change can never make the relative deletes below hit the wrong project.
+    # Deliberately NOT deleted: pubspec.lock and .fvmrc — source-controlled
+    # files that pin dependency/SDK versions, not caches.
     foreach ($pubspec in $pubspecFiles) {
         $projectDir = $pubspec.DirectoryName
         Write-Host "  Cleaning: $projectDir" -ForegroundColor Cyan
 
-        Push-Location $projectDir
-
-        # FVM cleanup
-        if (Test-Path ".fvm") {
+        # FVM cleanup (project-local symlink cache; gitignored)
+        if (Test-Path (Join-Path $projectDir ".fvm")) {
             Write-Host "    Removing FVM cache..." -ForegroundColor DarkGray
-            Remove-SafelyWithTracking -Path ".fvm" -Description "FVM folder"
-        }
-        if (Test-Path ".fvmrc") {
-            Remove-SafelyWithTracking -Path ".fvmrc" -Description "FVM config"
+            Remove-SafelyWithTracking -Path (Join-Path $projectDir ".fvm") -Description "FVM folder"
         }
 
         # Flutter build artifacts
         Write-Host "    Removing Flutter build artifacts..." -ForegroundColor DarkGray
-        Remove-SafelyWithTracking -Path "build" -Description "build folder"
-        Remove-SafelyWithTracking -Path ".dart_tool" -Description ".dart_tool folder"
-        Remove-SafelyWithTracking -Path ".packages" -Description ".packages file"
-        Remove-SafelyWithTracking -Path "pubspec.lock" -Description "pubspec.lock file"
+        Remove-SafelyWithTracking -Path (Join-Path $projectDir "build") -Description "build folder"
+        Remove-SafelyWithTracking -Path (Join-Path $projectDir ".dart_tool") -Description ".dart_tool folder"
+        Remove-SafelyWithTracking -Path (Join-Path $projectDir ".packages") -Description ".packages file"
 
         # Android artifacts
-        if (Test-Path "android") {
+        if (Test-Path (Join-Path $projectDir "android")) {
             Write-Host "    Removing Android build artifacts..." -ForegroundColor DarkGray
-            Remove-SafelyWithTracking -Path "android\.gradle" -Description "Android Gradle cache"
-            Remove-SafelyWithTracking -Path "android\build" -Description "Android build folder"
-            Remove-SafelyWithTracking -Path "android\app\build" -Description "Android app build folder"
+            Remove-SafelyWithTracking -Path (Join-Path $projectDir "android\.gradle") -Description "Android Gradle cache"
+            Remove-SafelyWithTracking -Path (Join-Path $projectDir "android\build") -Description "Android build folder"
+            Remove-SafelyWithTracking -Path (Join-Path $projectDir "android\app\build") -Description "Android app build folder"
         }
 
         # Windows artifacts
-        if (Test-Path "windows\flutter\ephemeral") {
+        if (Test-Path (Join-Path $projectDir "windows\flutter\ephemeral")) {
             Write-Host "    Removing Windows ephemeral files..." -ForegroundColor DarkGray
-            Remove-SafelyWithTracking -Path "windows\flutter\ephemeral" -Description "Windows ephemeral folder"
+            Remove-SafelyWithTracking -Path (Join-Path $projectDir "windows\flutter\ephemeral") -Description "Windows ephemeral folder"
         }
 
-        Pop-Location
         $cleanedCount++
         Write-Host "  ✅ Cleaned $projectDir" -ForegroundColor Green
     }
@@ -499,12 +515,19 @@ function Clear-WindowsTemp {
 
     Remove-SafelyWithTracking -Path "$env:LOCALAPPDATA\Temp" -Description "Local temp folder"
 
-    Write-Item "✓" "Green" "Emptying Recycle Bin..."
-    try {
-        Clear-RecycleBin -Force -ErrorAction Stop
-        Write-Item "✓" "Green" "Recycle Bin emptied"
-    } catch {
-        Write-Item "✕" "Yellow" "Could not empty Recycle Bin"
+    # Opt-in: the Recycle Bin is the last chance to recover deleted files.
+    Write-Host ""
+    Write-Host "⚠️  Empty the Recycle Bin? Files in it CANNOT be recovered afterwards." -ForegroundColor Yellow
+    $binAns = Read-Host "Empty Recycle Bin? (y/N)"
+    if ($binAns -eq 'y' -or $binAns -eq 'Y') {
+        try {
+            Clear-RecycleBin -Force -ErrorAction Stop
+            Write-Item "✓" "Green" "Recycle Bin emptied"
+        } catch {
+            Write-Item "✕" "Yellow" "Could not empty Recycle Bin"
+        }
+    } else {
+        Write-Item "ℹ️" "Yellow" "Recycle Bin left untouched."
     }
 
     if (Test-Administrator) {
@@ -581,22 +604,16 @@ function Clear-AppContainers {
         Remove-SafelyWithTracking -Path "$env:APPDATA\Slack\Service Worker\CacheStorage" -Description "Slack Service Worker"
     }
 
-    # Microsoft Teams Classic
+    # Microsoft Teams Classic — caches only. databases/IndexedDB/Local Storage/
+    # blob_storage are app data (sign-in state, message store), not caches.
     if (Test-Path "$env:APPDATA\Microsoft\Teams") {
         Remove-SafelyWithTracking -Path "$env:APPDATA\Microsoft\Teams\Cache" -Description "Teams Cache"
-        Remove-SafelyWithTracking -Path "$env:APPDATA\Microsoft\Teams\blob_storage" -Description "Teams blob storage"
-        Remove-SafelyWithTracking -Path "$env:APPDATA\Microsoft\Teams\databases" -Description "Teams databases"
         Remove-SafelyWithTracking -Path "$env:APPDATA\Microsoft\Teams\GPUCache" -Description "Teams GPU Cache"
-        Remove-SafelyWithTracking -Path "$env:APPDATA\Microsoft\Teams\IndexedDB" -Description "Teams IndexedDB"
-        Remove-SafelyWithTracking -Path "$env:APPDATA\Microsoft\Teams\Local Storage" -Description "Teams Local Storage"
         Remove-SafelyWithTracking -Path "$env:APPDATA\Microsoft\Teams\tmp" -Description "Teams temp"
     }
 
-    # Microsoft Teams New
-    $teamsNew = "$env:LOCALAPPDATA\Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams"
-    if (Test-Path $teamsNew) {
-        Remove-SafelyWithTracking -Path $teamsNew -Description "Teams New cache"
-    }
+    # Microsoft Teams New: intentionally untouched — its LocalCache folder is
+    # the app's data store, and deleting it signs the user out.
 
     # Discord
     if (Test-Path "$env:APPDATA\discord") {
@@ -604,12 +621,10 @@ function Clear-AppContainers {
         Remove-SafelyWithTracking -Path "$env:APPDATA\discord\Code Cache" -Description "Discord Code Cache"
     }
 
-    # Spotify
+    # Spotify — cache only. %APPDATA%\Spotify is the whole app (login,
+    # settings, the application itself), never delete it.
     if (Test-Path "$env:LOCALAPPDATA\Spotify") {
         Remove-SafelyWithTracking -Path "$env:LOCALAPPDATA\Spotify\Storage" -Description "Spotify Storage"
-    }
-    if (Test-Path "$env:APPDATA\Spotify") {
-        Remove-SafelyWithTracking -Path "$env:APPDATA\Spotify" -Description "Spotify Data"
     }
 
     # WhatsApp
@@ -896,17 +911,11 @@ function Invoke-EstimateAll {
         "$env:APPDATA\Slack\Cache",
         "$env:APPDATA\Slack\Service Worker\CacheStorage",
         "$env:APPDATA\Microsoft\Teams\Cache",
-        "$env:APPDATA\Microsoft\Teams\blob_storage",
-        "$env:APPDATA\Microsoft\Teams\databases",
         "$env:APPDATA\Microsoft\Teams\GPUCache",
-        "$env:APPDATA\Microsoft\Teams\IndexedDB",
-        "$env:APPDATA\Microsoft\Teams\Local Storage",
         "$env:APPDATA\Microsoft\Teams\tmp",
-        "$env:LOCALAPPDATA\Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams",
         "$env:APPDATA\discord\Cache",
         "$env:APPDATA\discord\Code Cache",
         "$env:LOCALAPPDATA\Spotify\Storage",
-        "$env:APPDATA\Spotify",
         "$env:LOCALAPPDATA\WhatsApp\Cache"
     )
     $waUwp = Get-ChildItem -Path "$env:LOCALAPPDATA\Packages" -Filter "*WhatsApp*" -Directory -ErrorAction SilentlyContinue
@@ -1144,6 +1153,12 @@ if ($Version) {
     Write-Host "A powerful cleanup utility for development environments"
     Write-Host "Repository: $GITHUB_REPO"
     exit 0
+}
+
+# Restore the caller's working directory after an elevated relaunch, BEFORE
+# any "." defaults below are interpreted (elevated processes start in System32).
+if ($WorkDir -and (Test-Path $WorkDir)) {
+    Set-Location $WorkDir
 }
 
 # Determine Flutter search directory (priority: CLI > ENV > Default)

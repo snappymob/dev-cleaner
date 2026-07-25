@@ -3,7 +3,7 @@
 
 ## Metadata
 - **Author:** Jemish Avasoya
-- **Repo:** https://github.com/jemishavasoya/dev-cleaner
+- **Repo:** https://github.com/snappymob/dev-cleaner
 - **License:** MIT
 - **Platforms:** macOS (Intel/Silicon), Linux (x64/ARM)
 
@@ -16,10 +16,10 @@
 ## Installation & Usage
 
 ### One-liner (Fastest)
-curl -fsSL https://raw.githubusercontent.com/jemishavasoya/dev-cleaner/main/dev-cleaner.sh -o dev-cleanup.sh && chmod +x dev-cleanup.sh && ./dev-cleanup.sh
+curl -fsSL https://raw.githubusercontent.com/snappymob/dev-cleaner/main/dev-cleaner.sh -o dev-cleanup.sh && chmod +x dev-cleanup.sh && ./dev-cleanup.sh
 
 ### Homebrew (Recommended for macOS)
-brew tap jemishavasoya/dev-cleaner
+brew tap snappymob/dev-cleaner
 brew install dev-cleaner
 dev-cleaner
 
